@@ -232,7 +232,7 @@ void ShuangpinKeymapWindow::paint() {
     const D2D1_RECT_F destination{origin_x, origin_y, origin_x + drawn_width, origin_y + drawn_height};
     image_target->BeginDraw();
     image_target->Clear(D2D1::ColorF(0, 0.0f));
-    image_target->DrawBitmap(image_, destination, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_HIGH_QUALITY);
+    image_target->DrawBitmap(image_, destination, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     const HRESULT image_drawn = image_target->EndDraw();
     if (SUCCEEDED(image_drawn) && FAILED(device_.Present()))
       throw std::runtime_error("Xiaohe root presentation failed");
