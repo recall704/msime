@@ -1,16 +1,15 @@
 name: Release Windows
+# 只在推送 windows-v* 标签时构建；版本来自标签本身（windows-v0.2.2 或 windows-v0.2.2-beta），
+# 不再有 workflow_dispatch 输入。只编 amd64（x64）产物；Build-Client.ps1 仍会编 32 位与 ARM64 的
+# TSF，这里不跑 arm64 安装验证任务，也不再使用 Depot 托管 runner。
 on:
-  workflow_dispatch:
-    inputs:
-      version: {description: Semantic version (defaults to platforms/windows/version.txt), required: false, type: string}
-      prerelease: {description: Mark as prerelease, required: false, default: false, type: boolean}
-      publish: {description: Publish the installer as a windows-v release (otherwise it is only uploaded as a workflow artifact), required: false, default: true, type: boolean}
-      signpath_test: {description: Sign with the SignPath test-signing policy (untrusted test certificate) to exercise the signing jobs; such a run never publishes, required: false, default: false, type: boolean}
+  push:
+    tags:
+      - 'windows-v*'
 permissions: {contents: write}
-# 签名测试不发布，单独一个并发组，不让它排在真正的发布前面。
-concurrency: {group: "release-windows${{ inputs.signpath_test && '-signpath-test' || '' }}", cancel-in-progress: false}
+concurrency: {group: "release-windows", cancel-in-progress: false}
 jobs:
-  # Resolves the dispatched commit up front, so every edition, the coexistence check and the publish job (tag target, release notes) use the same source even if the branch moves during the run.
+  # Resolves the tagged commit up front, so the build, package and publish jobs (tag target, release notes) use the same source even if the tag moves during the run.
   source:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -21,16 +20,22 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - id: version
         shell: pwsh
-        env: {REQUESTED: "${{ inputs.version }}"}
+        env: {TAG: "${{ github.ref_name }}"}
         run: |
+          # 版本来自推送的标签：windows-v0.2.2 -> 0.2.2，windows-v0.2.2-beta -> 0.2.2（release 保留后缀）。
+          $release = $env:TAG
+          if (-not $release.StartsWith('windows-v')) { throw "tag $release is not a windows-v tag" }
+          $release = $release.Substring('windows-v'.Length)
           # Build-Client.ps1 stamps this into the Tauri and Server metadata, which take three numeric components only.
-          $v = if ($env:REQUESTED) {$env:REQUESTED.Trim()} else {(Get-Content platforms/windows/version.txt -Raw).Trim()}; if ($v -notmatch '^\d+\.\d+\.\d+$') {throw 'invalid version'}; "value=$v" >> $env:GITHUB_OUTPUT
-          # The release tag and title carry the branch the run was dispatched from: none on main, -beta on develop, -alpha anywhere else. A suffixed release is always published as a prerelease, which the in-app update checks skip.
-          $suffix = switch ($env:GITHUB_REF_NAME) {'main' {''} 'develop' {'-beta'} default {'-alpha'}}; "release=$v$suffix" >> $env:GITHUB_OUTPUT
-      # SignPath 签名由本仓库的变量 WINDOWS_SIGNING_PROVIDER=signpath 打开；它不能建在组织级，否则别的仓库会一起打开。打开时其余配置缺一项就失败，不悄悄退回未签名；不设置时照旧发未签名安装包。只签 main 的正式版和 develop 的 beta：其他分支的 -alpha 是试验构建，不占用签名和审批，照旧不签名。
-      # 输入 signpath_test 不看这个开关，在任何分支上用 test-signing 策略走一遍签名任务：测试证书不受系统信任，策略不需要审批，所以这种运行从不发布（publish 任务被跳过），只用来验证签名链路。签名流程见 docs/code-signing-policy.md。
+          $v = ($release -split '-')[0]
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "invalid version in tag: $release" }
+          $pre = if ($release -ne $v) { 'true' } else { 'false' }
+          "value=$v" >> $env:GITHUB_OUTPUT
+          "release=$release" >> $env:GITHUB_OUTPUT
+          "prerelease=$pre" >> $env:GITHUB_OUTPUT
+      # SignPath 签名由本仓库的变量 WINDOWS_SIGNING_PROVIDER=signpath 打开；打开时其余配置缺一项就失败，不悄悄退回未签名；不设置时照旧发未签名安装包。标签构建没有分支概念，因此不再限制只在 main/develop 上签名。
       - id: signing
-        env: {PROVIDER: "${{ vars.WINDOWS_SIGNING_PROVIDER }}", TEST: "${{ inputs.signpath_test }}", TOKEN_SET: "${{ secrets.SIGNPATH_TOKEN != '' }}", ORGANIZATION: "${{ vars.SIGNPATH_ORGANIZATION_ID }}", PROJECT: "${{ vars.SIGNPATH_PROJECT_SLUG }}", POLICY: "${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}"}
+        env: {PROVIDER: "${{ vars.WINDOWS_SIGNING_PROVIDER }}", TOKEN_SET: "${{ secrets.SIGNPATH_TOKEN != '' }}", ORGANIZATION: "${{ vars.SIGNPATH_ORGANIZATION_ID }}", PROJECT: "${{ vars.SIGNPATH_PROJECT_SLUG }}", POLICY: "${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}"}
         run: |
           require() {
             missing=()
@@ -40,26 +45,14 @@ jobs:
             for name in "$@"; do missing+=("$name"); done
             if (( ${#missing[@]} )); then echo "::error::SignPath 签名缺少配置：${missing[*]}"; exit 1; fi
           }
-          if [[ "$TEST" == true ]]; then
-            require
-            echo 'signpath=true' >> "$GITHUB_OUTPUT"
-            echo 'policy=test-signing' >> "$GITHUB_OUTPUT"
-            echo '::notice::signpath_test：用 SignPath test-signing 策略签名，安装包带不受信任的测试证书，本次运行不发布。'
-            exit 0
-          fi
           case "$PROVIDER" in
             '')
               echo 'signpath=false' >> "$GITHUB_OUTPUT"
               echo '::notice::WINDOWS_SIGNING_PROVIDER 未设置，本次发布未签名的安装包。' ;;
             signpath)
               if [[ -n "$POLICY" ]]; then require; else require vars.SIGNPATH_SIGNING_POLICY_SLUG; fi
-              if [[ "$GITHUB_REF_NAME" != main && "$GITHUB_REF_NAME" != develop ]]; then
-                echo 'signpath=false' >> "$GITHUB_OUTPUT"
-                echo "::notice::$GITHUB_REF_NAME 不是 main 或 develop，本次发布未签名的 -alpha 安装包。"
-              else
-                echo 'signpath=true' >> "$GITHUB_OUTPUT"
-                echo "policy=$POLICY" >> "$GITHUB_OUTPUT"
-              fi ;;
+              echo 'signpath=true' >> "$GITHUB_OUTPUT"
+              echo "policy=$POLICY" >> "$GITHUB_OUTPUT" ;;
             *)
               echo "::error::未知的 WINDOWS_SIGNING_PROVIDER：$PROVIDER（只能是 signpath，或者不设置）"; exit 1 ;;
           esac
@@ -67,14 +60,15 @@ jobs:
       sha: ${{ steps.commit.outputs.sha }}
       version: ${{ steps.version.outputs.value }}
       release: ${{ steps.version.outputs.release }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
       policy: ${{ steps.signing.outputs.policy }}
       signpath: ${{ steps.signing.outputs.signpath }}
   # The Rust half of the client (host DLLs, MCP server, Tauri panel shell) does not depend on the edition, so it is built once per architecture here, in parallel, rather than six times over in every edition's job, where it was most of the build time.
   rust:
     needs: source
-    # SignPath 的开源项目只接受签名请求之前的每个 job 都跑在 GitHub 托管 runner 上，所以签名时 rust、release、package 都换到 windows-2025（4 核，超时放宽）；不签名时留在 Depot 上。
-    runs-on: ${{ needs.source.outputs.signpath == 'true' && 'windows-2025' || 'depot-windows-2025-8' }}
-    timeout-minutes: ${{ needs.source.outputs.signpath == 'true' && 120 || 60 }}
+    # fork 上没有 Depot（depot-* 是第三方托管 runner 的标签），rust、release、package 统一跑 GitHub 托管的 windows-2025（4 核）。
+    runs-on: windows-2025
+    timeout-minutes: 120
     strategy:
       fail-fast: true
       matrix:
@@ -83,11 +77,11 @@ jobs:
       RUSTC_WRAPPER: sccache
       CARGO_INCREMENTAL: '0'
       # GitHub 托管 runner 没有 Depot Cache，sccache 改用 GitHub Actions 缓存。
-      SCCACHE_GHA_ENABLED: ${{ needs.source.outputs.signpath == 'true' && 'true' || 'false' }}
+      SCCACHE_GHA_ENABLED: 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {ref: "${{ needs.source.outputs.sha }}", persist-credentials: false}
-      # Depot runners start with SCCACHE_WEBDAV_ENDPOINT pointing at Depot Cache, so with RUSTC_WRAPPER in the job env rustc output is cached across runs without a token. CARGO_INCREMENTAL=0 because sccache does not cache incremental compilation.
+      # GitHub 托管 runner 没有 Depot Cache，sccache 走 GitHub Actions 缓存。CARGO_INCREMENTAL=0 because sccache does not cache incremental compilation.
       - name: Install sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - if: matrix.arch == 'x64'
@@ -113,7 +107,7 @@ jobs:
           }
           ./platforms/windows/Build-RustOutputs.ps1 -Architecture $env:ARCH -OutputDirectory (Join-Path $env:RUNNER_TEMP 'msime-rust') -TargetVersion $env:VERSION
           Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP "msime-rust/$env:ARCH") | Format-Table Name, Length
-      # Not msime-windows-*: the coexistence and publish jobs download that pattern as the installers.
+      # Not msime-windows-*: the publish job downloads that pattern as the installers.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: msime-rust-windows-${{ matrix.arch }}-${{ needs.source.outputs.version }}
@@ -122,19 +116,19 @@ jobs:
   # 每个版本（shared/contracts/editions.json 里有 Windows 段的 id）各打一个安装包，可以同时安装，也可以和 msime-windows 同时安装。full 的安装包名、AppId、目录和注册表键也是自己的，不再是 msime-windows 的那一组。
   release:
     needs: [source, rust]
-    runs-on: ${{ needs.source.outputs.signpath == 'true' && 'windows-2025' || 'depot-windows-2025-8' }}
+    runs-on: windows-2025
     timeout-minutes: 150
     strategy:
       fail-fast: true
       matrix:
-        edition: [full, wubi, pinyin, japanese, vietnamese, tibetan]
+        edition: [full]
     env:
       VCPKG_DISABLE_METRICS: '1'
       # Python on Windows otherwise decodes text as the ANSI code page, and the fetch and packaging scripts read UTF-8 sources.
       PYTHONUTF8: '1'
       RUSTC_WRAPPER: sccache
       CARGO_INCREMENTAL: '0'
-      SCCACHE_GHA_ENABLED: ${{ needs.source.outputs.signpath == 'true' && 'true' || 'false' }}
+      SCCACHE_GHA_ENABLED: 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {ref: "${{ needs.source.outputs.sha }}", fetch-depth: 0, persist-credentials: false}
@@ -273,7 +267,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           ./platforms/windows/installer/Collect-Symbols.ps1 -Edition $env:EDITION -Version $env:VERSION -OutputDirectory dist-symbols
           Get-ChildItem dist-symbols | Format-Table Name, Length
-      # 单独的产物，名字不匹配下面的 msime-windows-* 模式，所以 coexistence 任务不会下载符号；publish 两个都取。
+      # 单独的产物，名字不匹配下面的 msime-windows-* 模式，所以不会被当作安装包；publish 两个都取。
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: msime-symbols-windows-${{ matrix.edition }}-${{ steps.version.outputs.value }}
@@ -349,12 +343,12 @@ jobs:
   package:
     needs: [source, release, sign-payload]
     if: ${{ !cancelled() && !failure() }}
-    runs-on: ${{ needs.source.outputs.signpath == 'true' && 'windows-2025' || 'depot-windows-2025-8' }}
-    timeout-minutes: 60
+    runs-on: windows-2025
+    timeout-minutes: 90
     strategy:
       fail-fast: true
       matrix:
-        edition: [full, wubi, pinyin, japanese, vietnamese, tibetan]
+        edition: [full]
     env:
       PYTHONUTF8: '1'
     steps:
@@ -418,7 +412,7 @@ jobs:
           $base = (python platforms/windows/scripts/edition_windows.py field --edition $env:EDITION installer_base_name).Trim()
           if ($LASTEXITCODE -ne 0) { throw 'edition installer name lookup failed' }
           ./platforms/windows/installer/tests/install-smoke.ps1 -Installer "dist/${base}_v$env:VERSION.exe" -Edition $env:EDITION
-  # 六个版本的安装包合成一次 SignPath 签名请求，签好后重算 .sha256，作为一个 msime-windows-signed-<版本> 产物交给下游：它匹配 msime-windows-* 模式，coexistence 和 publish 不用区分签没签名。
+  # 安装包合成一次 SignPath 签名请求，签好后重算 .sha256，作为一个 msime-windows-signed-<版本> 产物交给下游：它匹配 msime-windows-* 模式，publish 不用区分签没签名。
   sign-installers:
     needs: [source, release, package]
     if: ${{ !cancelled() && !failure() && needs.source.outputs.signpath == 'true' }}
@@ -473,65 +467,9 @@ jobs:
           name: msime-windows-signed-${{ needs.release.outputs.version }}
           path: dist/
           if-no-files-found: error
-  # 几个版本的安装包装在同一台机器上：各自的 TIP、COM 注册、HKLM 键、看门狗任务和数据目录同时存在，卸掉一个版本不碰 full；机器上还伪造了一份 msime-windows 的注册表键和数据目录，没有哪个版本接管或删除它。runner 是一次性的管理员环境。
-  coexistence:
-    needs: [source, release, package, sign-installers]
-    if: ${{ !cancelled() && !failure() }}
-    runs-on: windows-2025
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: {ref: "${{ needs.source.outputs.sha }}", persist-credentials: false}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: msime-windows-*-${{ needs.release.outputs.version }}
-          path: dist
-          merge-multiple: true
-      - name: Install the editions side by side
-        shell: pwsh
-        env: {VERSION: "${{ needs.release.outputs.version }}"}
-        run: |
-          $installers = @{}
-          foreach ($edition in (python platforms/windows/scripts/edition_windows.py editions).Trim().Split(',')) {
-            $base = (python platforms/windows/scripts/edition_windows.py field --edition $edition installer_base_name).Trim()
-            $installers[$edition] = "dist/${base}_v$env:VERSION.exe"
-          }
-          ./platforms/windows/installer/tests/coexistence-smoke.ps1 -Installers $installers
-  # 同一个安装包装在 Windows on Arm 上：装的是 Arm64X TIP 和 ARM64 宿主，原生 ARM64 进程和模拟的 x64 进程都能经 COM 注册创建 TIP，卸载照样干净。
-  arm64:
-    needs: [source, release, package, sign-installers]
-    if: ${{ !cancelled() && !failure() }}
-    runs-on: windows-11-arm
-    timeout-minutes: 60
-    strategy:
-      fail-fast: true
-      matrix:
-        edition: [full, wubi, pinyin, japanese, vietnamese, tibetan]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: {ref: "${{ needs.source.outputs.sha }}", persist-credentials: false}
-      # 签名时六个安装包在同一个 msime-windows-signed-<版本> 产物里，每个任务取整份、只装自己那个。
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: msime-windows-${{ needs.source.outputs.signpath == 'true' && 'signed' || matrix.edition }}-${{ needs.release.outputs.version }}
-          path: dist
-      - name: Install and uninstall the package
-        shell: pwsh
-        env: {VERSION: "${{ needs.release.outputs.version }}", EDITION: "${{ matrix.edition }}"}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # Windows on Arm has no x64 PowerShell, and the runner's pwsh is ARM64; an x64 one, run emulated, creates the TIP from an x64 process.
-          $zip = Join-Path $env:RUNNER_TEMP 'pwsh-x64.zip'
-          Invoke-WebRequest -Uri 'https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/PowerShell-7.6.6-win-x64.zip' -OutFile $zip
-          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne '02FE458BE20493FBDF43F61EA20610B811EE6C738AB1676C61B9CFCD1A33C860') { throw 'PowerShell x64 digest mismatch' }
-          $pwshX64 = Join-Path $env:RUNNER_TEMP 'pwsh-x64'
-          Expand-Archive -LiteralPath $zip -DestinationPath $pwshX64 -Force
-          $base = (python platforms/windows/scripts/edition_windows.py field --edition $env:EDITION installer_base_name).Trim()
-          if ($LASTEXITCODE -ne 0) { throw 'edition installer name lookup failed' }
-          ./platforms/windows/installer/tests/install-smoke.ps1 -Installer "dist/${base}_v$env:VERSION.exe" -Edition $env:EDITION -X64PowerShell (Join-Path $pwshX64 'pwsh.exe')
   publish:
-    needs: [source, release, coexistence, arm64]
-    if: ${{ inputs.publish && !inputs.signpath_test && !cancelled() && !failure() }}
+    needs: [source, release, package, sign-installers]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -550,7 +488,7 @@ jobs:
       - name: Publish independent Windows release
         shell: bash
         # RELEASE_PUBLISH_TOKEN (org secret, a fine-grained token with Contents and Workflows write) creates the tag: GitHub refuses GITHUB_TOKEN a new ref whose .github/workflows differs from the default branch, which is the case whenever develop takes a workflow change while the release builds (Release Linux run 37259338700, 403 Resource not accessible by integration). Without the secret, as on a fork, it falls back to GITHUB_TOKEN.
-        env: {GH_TOKEN: "${{ secrets.RELEASE_PUBLISH_TOKEN || github.token }}", VERSION: "${{ needs.release.outputs.version }}", RELEASE: "${{ needs.release.outputs.release }}", PRERELEASE: "${{ inputs.prerelease }}", EVERYAPI_RELEASE_NOTES_TOKEN: "${{ secrets.EVERYAPI_RELEASE_NOTES_TOKEN }}", EVERYAPI_RELEASE_NOTES_MODEL: "${{ vars.EVERYAPI_RELEASE_NOTES_MODEL }}"}
+        env: {GH_TOKEN: "${{ secrets.RELEASE_PUBLISH_TOKEN || github.token }}", VERSION: "${{ needs.release.outputs.version }}", RELEASE: "${{ needs.release.outputs.release }}", PRERELEASE: "${{ needs.source.outputs.prerelease }}", EVERYAPI_RELEASE_NOTES_TOKEN: "${{ secrets.EVERYAPI_RELEASE_NOTES_TOKEN }}", EVERYAPI_RELEASE_NOTES_MODEL: "${{ vars.EVERYAPI_RELEASE_NOTES_MODEL }}"}
         run: |
           tag="windows-v${RELEASE}"
           [[ "$RELEASE" == "$VERSION" ]] || export PRERELEASE=true
