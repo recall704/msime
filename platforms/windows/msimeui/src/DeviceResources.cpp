@@ -637,6 +637,71 @@ ID2D1Bitmap *DeviceResources::GetBitmapFromFile(const std::wstring &filePath, D2
     return bitmapCache_.back().bitmap.Get();
 }
 
+ID2D1Bitmap *DeviceResources::GetBitmapFromMemory(const void *data, size_t size, const std::wstring &key,
+                                                  D2D1_SIZE_F *outSize)
+{
+    ID2D1RenderTarget *target = GetRenderTarget();
+    if (!target || !data || size == 0 || size > 0xFFFFFFFFull || key.empty() || !EnsureImagingFactory())
+    {
+        return nullptr;
+    }
+
+    for (auto &entry : bitmapCache_)
+    {
+        if (entry.filePath == key && entry.bitmap)
+        {
+            if (outSize)
+            {
+                *outSize = entry.size;
+            }
+            return entry.bitmap.Get();
+        }
+    }
+
+    Microsoft::WRL::ComPtr<IWICStream> stream;
+    if (FAILED(wicFactory_->CreateStream(stream.GetAddressOf())) ||
+        FAILED(stream->InitializeFromMemory(reinterpret_cast<BYTE *>(const_cast<void *>(data)),
+                                            static_cast<DWORD>(size))))
+    {
+        return nullptr;
+    }
+
+    Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+    if (FAILED(wicFactory_->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnLoad,
+                                                    decoder.GetAddressOf())))
+    {
+        return nullptr;
+    }
+
+    Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+    if (FAILED(decoder->GetFrame(0, frame.GetAddressOf())))
+    {
+        return nullptr;
+    }
+
+    Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+    if (FAILED(wicFactory_->CreateFormatConverter(converter.GetAddressOf())) ||
+        FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
+                                     WICBitmapPaletteTypeMedianCut)))
+    {
+        return nullptr;
+    }
+
+    BitmapCacheEntry entry;
+    entry.filePath = key;
+    if (FAILED(target->CreateBitmapFromWicBitmap(converter.Get(), nullptr, entry.bitmap.GetAddressOf())))
+    {
+        return nullptr;
+    }
+    entry.size = entry.bitmap->GetSize();
+    bitmapCache_.push_back(std::move(entry));
+    if (outSize)
+    {
+        *outSize = bitmapCache_.back().size;
+    }
+    return bitmapCache_.back().bitmap.Get();
+}
+
 ID2D1Bitmap *DeviceResources::GetBitmapFromIcon(HICON icon, const std::wstring &key, D2D1_SIZE_F *size)
 {
     ID2D1RenderTarget *target = GetRenderTarget();

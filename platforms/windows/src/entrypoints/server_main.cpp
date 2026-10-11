@@ -32,6 +32,7 @@
 #include "TypingEffectOverlay.h"
 #include "TypingFeedbackPreference.h"
 #include "ShuangpinKeymapWindow.h"
+#include "XiaoheRootLayout.h"
 #include "ProcessImageName.h"
 #include "ModeMailbox.h"
 #include "PreviewConfig.h"
@@ -983,6 +984,9 @@ int wmain(int argc, wchar_t **argv) {
     // 「输入时显示双拼键位提示」（共享偏好 `shuangpin_keymap_hint`，没选过时文档里没有这一项，按关处理），同样经原子量发布，改了设置不用重启 Server。
     auto shuangpin_keymap_enabled = std::make_shared<std::atomic<bool>>(
         shuangpin_keymap_preference(prepared.at("value").at("preferences")));
+    // 「输入时显示小鹤音形字根」（共享偏好 `xiaohe_root_hint`，没选过时按关处理），独立于双拼键位提示，同样经原子量发布。
+    auto xiaohe_root_enabled = std::make_shared<std::atomic<bool>>(
+        xiaohe_root_preference(prepared.at("value").at("preferences")));
     // The typing flash's strength, published the same way. The effect itself comes with each key from the input thread.
     auto effect_intensity = std::make_shared<std::atomic<unsigned>>(
         typing_effect_intensity(prepared.at("value").at("preferences")));
@@ -1059,7 +1063,7 @@ int wmain(int argc, wchar_t **argv) {
     options.preferences_directory = config.state_root.u8string();
     options.preferences_published =
         [&, voice_config, voice_config_mutex, voice_host_options, traditional_output,
-         toolbar_enabled, follow_cursor, shuangpin_keymap_enabled, effect_intensity, typing_feedback, candidate_mouse_wheel, voice_theme, candidate_fonts, candidate_style,
+         toolbar_enabled, follow_cursor, shuangpin_keymap_enabled, xiaohe_root_enabled, effect_intensity, typing_feedback, candidate_mouse_wheel, voice_theme, candidate_fonts, candidate_style,
          toolbar_theme, menu_theme, mode_scope_global, app_mode_rules,
          input_mode_hud_enabled, tsf_config, candidate_layout,
          tsf_config_mutex, tray_preferences, tray_preferences_mutex,
@@ -1145,6 +1149,8 @@ int wmain(int argc, wchar_t **argv) {
               std::memory_order_release);
           shuangpin_keymap_enabled->store(shuangpin_keymap_preference(preferences),
                                           std::memory_order_release);
+          xiaohe_root_enabled->store(xiaohe_root_preference(preferences),
+                                     std::memory_order_release);
           effect_intensity->store(typing_effect_intensity(preferences),
                                   std::memory_order_release);
           typing_feedback->store(typing_feedback_wanted(preferences),
@@ -1358,6 +1364,8 @@ int wmain(int argc, wchar_t **argv) {
         });
     // 候选窗每次取快照时记下这一帧的双拼键位提示，主循环在 refresh 之后据此摆放键位图，两者看的是同一帧。
     std::optional<ShuangpinKeymapFrame> keymap_frame;
+    // 小鹤音形字根图同理，独立开关，可以和双拼键位图同时开。
+    std::optional<ShuangpinKeymapFrame> xiaohe_root_frame;
     // 光标处的打字特效浮层：火花、Power Mode、上屏后光标行的闪光和连击徽标，由候选窗取到特效后交来。声明在候选窗之前，先于它构造、晚于它析构，候选窗活着时浮层一直在。建不出窗口时记一条诊断，卡片照旧自己画闪光和连击数。
     std::optional<TypingEffectOverlay> typing_overlay;
     try {
@@ -1378,6 +1386,9 @@ int wmain(int argc, wchar_t **argv) {
           keymap_frame.reset();
           if (view && view->visible && view->shuangpin_keymap)
             keymap_frame = ShuangpinKeymapFrame{*view->shuangpin_keymap, view->x, view->y};
+          xiaohe_root_frame.reset();
+          if (view && view->visible && view->xiaohe_root)
+            xiaohe_root_frame = ShuangpinKeymapFrame{*view->xiaohe_root, view->x, view->y};
           return view;
         },
         [&](const CandidateClick &click) { (void)clicks.submit(click); },
@@ -1437,6 +1448,16 @@ int wmain(int argc, wchar_t **argv) {
       notice("Shuangpin keymap unavailable; continuing without it");
     }
     bool keymap_failure_reported = false;
+    // 小鹤音形字根图，同样贴着候选窗、穿候选窗的配色，独立开关。
+    std::optional<ShuangpinKeymapWindow> xiaohe_root;
+    try {
+      xiaohe_root.emplace();
+      xiaohe_root->set_kind(KeymapKind::XiaoheRoot);
+    } catch (const std::exception &) {
+      xiaohe_root.reset();
+      notice("Xiaohe root keymap unavailable; continuing without it");
+    }
+    bool xiaohe_root_failure_reported = false;
     {
       const auto &theme =
           resolved_theme(config.dark_theme, config.horizontal_candidates);
@@ -1446,6 +1467,8 @@ int wmain(int argc, wchar_t **argv) {
       candidates.set_palette(palette);
       if (keymap)
         keymap->set_palette(palette);
+      if (xiaohe_root)
+        xiaohe_root->set_palette(palette);
       // An external package may ask for a wider card than the font implies; the artwork is drawn against that width.
       const auto &assets = package_assets(theme.candidate_skin);
       candidates.set_skin_min_width(assets.min_width);
@@ -2118,6 +2141,17 @@ int wmain(int argc, wchar_t **argv) {
         if (keymap->failed() && !keymap_failure_reported) {
           keymap_failure_reported = true;
           notice(component_failure("Shuangpin keymap", keymap->failure_site()) +
+                 "; continuing without it");
+        }
+      }
+      if (xiaohe_root) {
+        xiaohe_root->update(xiaohe_root_enabled->load(std::memory_order_acquire)
+                                ? xiaohe_root_frame
+                                : std::nullopt,
+                            candidates);
+        if (xiaohe_root->failed() && !xiaohe_root_failure_reported) {
+          xiaohe_root_failure_reported = true;
+          notice(component_failure("Xiaohe root keymap", xiaohe_root->failure_site()) +
                  "; continuing without it");
         }
       }

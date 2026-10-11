@@ -7,3 +7,6 @@
 #include "src/ipc/ServerResources.h"
 
 IDI_MSIME_LOGO ICON "installer/assets/icons/msime.ico"
+
+// 小鹤音形字根键位图，直接画在候选窗旁；路径相对本文件，与上面的图标一致。
+IDR_MSIME_XHYX RCDATA "resources/xhyx.png"

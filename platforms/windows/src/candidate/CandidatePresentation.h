@@ -10,6 +10,7 @@
 #include "ShuangpinKeymapLayout.h"
 #include "TranslationDisplay.h"
 #include "WubiCodeHintPolicy.h"
+#include "XiaoheRootLayout.h"
 #include <algorithm>
 
 namespace msime::windows {
@@ -154,6 +155,8 @@ struct CandidatePresentation {
   bool game_host = false;
   // 双拼组字时候选窗旁的键位提示（方案名和要高亮的键），按 view 判断，不是双拼组字时为空；开关由 Server 主循环另外看。
   std::optional<ShuangpinKeymapHint> shuangpin_keymap;
+  // 小鹤音形字根图的高亮键，条件与双拼键位提示相同；独立开关，由 Server 主循环另外看。
+  std::optional<ShuangpinKeymapHint> xiaohe_root;
   // Tab 预选的释义列（1 或 2），候选窗给高亮候选的那一行释义画下划线；0 表示没有预选。见 GlossColumnPolicy.h。
   int armed_gloss_column = 0;
   // Show/Move 包报来的组字锚点（物理像素，文字底边的左端），没有报过时 caret_anchor_known 为 false。上面的 x/y 不能当光标用：按键包不带坐标，x/y 每个按键都被写成线上结构的默认值 (100,100)，要等随后的 Move 才改回来，组字结束后就不再有 Move。输入模式提示在没有系统光标时靠它摆位置，同一租约里跨按键沿用。
@@ -272,6 +275,7 @@ candidate_presentation_from_view(const FocusLease &lease,
       static_cast<int>(view.value("scheme", 0u)));
   output.shows_glosses = candidate_view_shows_glosses(view);
   output.shuangpin_keymap = shuangpin_keymap_hint(view);
+  output.xiaohe_root = xiaohe_root_hint(view);
   output.armed_gloss_column =
       candidate_armed_gloss_column(output.candidates, view.value("armed_gloss_column", 0));
   output.visible = true;
@@ -345,6 +349,7 @@ candidate_presentation(const FocusLease &lease, const PendingReply &reply,
       static_cast<int>(view.value("scheme", 0u)));
   output.shows_glosses = candidate_view_shows_glosses(view);
   output.shuangpin_keymap = shuangpin_keymap_hint(view);
+  output.xiaohe_root = xiaohe_root_hint(view);
   output.armed_gloss_column =
       candidate_armed_gloss_column(output.candidates, view.value("armed_gloss_column", 0));
   output.visible = true;

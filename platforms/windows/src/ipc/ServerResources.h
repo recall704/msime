@@ -8,4 +8,8 @@
 // Manager for free rather than the blank default.
 #define IDI_MSIME_LOGO 1
 
+// 小鹤音形字根键位图（resources/xhyx.png），双拼组字时直接画在候选窗旁。作为 RCDATA 嵌入 Server，
+// 免得依赖安装器把图片复制到某个运行期目录。
+#define IDR_MSIME_XHYX 2
+
 #endif // MSIME_SERVER_RESOURCES_H

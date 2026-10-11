@@ -917,6 +917,11 @@ pub struct Preferences {
     /// 没写过时为 `None`，不写进文档：这个开关以前只存在 macOS 本机的 defaults 里（`MSIMEClientShuangpinKeymap`），macOS 在文档从没带过这一项时仍读那里的旧选择，再由下一次保存写进文档；文档带着这一项载入过一次之后 macOS 删掉那个旧键，此后缺这一项在所有宿主上都是关。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shuangpin_keymap_hint: Option<bool>,
+    /// 「输入时显示小鹤音形字根」：双拼组字时在候选窗旁显示小鹤形码的字根键位图（每个字母键承载哪些字根），与 `shuangpin_keymap_hint` 相互独立。目前只有 Windows 画它。
+    ///
+    /// 没写过时为 `None`，不写进文档；没有 macOS 那样的旧键要迁移，所有宿主缺这一项时都按关处理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xiaohe_root_hint: Option<bool>,
     /// The Vietnamese input method and tone placement.
     #[serde(default)]
     pub vietnamese: VietnamesePreferences,
@@ -2044,6 +2049,7 @@ impl Default for Preferences {
             shuangpin_custom_profile: ShuangpinCustomProfile::default(),
             shuangpin_preedit_uses_raw: true,
             shuangpin_keymap_hint: None,
+            xiaohe_root_hint: None,
             vietnamese: VietnamesePreferences::default(),
             single_character_only: false,
             candidate_page_size: 6,

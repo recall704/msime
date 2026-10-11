@@ -3,8 +3,11 @@
 #include "ToolbarCoordinates.h"
 #include "ToolbarTooltips.h"
 #include "WindowShadow.h"
+#include "XiaoheRootLayout.h"
+#include "../ipc/ServerResources.h"
 #include "msime_client.h"
 #include "../../../common/HostApiString.h"
+#include <algorithm>
 #include <cmath>
 #include <iterator>
 #include <memory>
@@ -91,13 +94,35 @@ void ShuangpinKeymapWindow::fail(ComponentFailureSite site) {
   failed_ = true;
   hide();
 }
-void ShuangpinKeymapWindow::load_profile(const std::string &profile) {
-  if (profile == profile_ && !title_.empty())
+void ShuangpinKeymapWindow::set_kind(KeymapKind kind) {
+  if (kind_ == kind)
     return;
-  profile_ = profile;
-  rows_ = shuangpin_keymap_rows(profile_table(msime_client_shuangpin_key_hints, profile_));
-  zero_initials_ = wide(shuangpin_keymap_zero_initial_text(profile_table(msime_client_shuangpin_zero_initials, profile_)));
-  title_ = toolbar_scheme_title("shuangpin", profile_, "") + L"键位";
+  kind_ = kind;
+  loaded_identity_.clear();
+  // 字根图和双拼键位图共用同一块卡片尺寸（620×203 DIP，见 ShuangpinKeymapMetrics 默认值）；图片等比缩放到卡片内，不拉伸。
+  metrics_ = ShuangpinKeymapMetrics{};
+}
+void ShuangpinKeymapWindow::load_profile(const std::string &profile) {
+  std::string identity;
+  ShuangpinKeymapRows rows;
+  std::wstring title;
+  std::wstring footer;
+  if (kind_ == KeymapKind::XiaoheRoot) {
+    // 字根图在绘制时按需载入；这里只要记住内容没变即可。
+    loaded_identity_ = "xiaohe-root";
+    return;
+  }
+  const std::string normalized(normalize_shuangpin_profile(profile));
+  identity = "shuangpin:" + normalized;
+  if (identity == loaded_identity_ && !rows_.empty())
+    return;
+  rows = shuangpin_keymap_rows(profile_table(msime_client_shuangpin_key_hints, normalized));
+  footer = wide(shuangpin_keymap_zero_initial_text(profile_table(msime_client_shuangpin_zero_initials, normalized)));
+  title = toolbar_scheme_title("shuangpin", normalized, "") + L"键位";
+  loaded_identity_ = std::move(identity);
+  rows_ = std::move(rows);
+  title_ = std::move(title);
+  footer_ = std::move(footer);
 }
 void ShuangpinKeymapWindow::update(const std::optional<ShuangpinKeymapFrame> &frame,
                                    const CandidateWindow &candidates) {
@@ -124,7 +149,8 @@ void ShuangpinKeymapWindow::update(const std::optional<ShuangpinKeymapFrame> &fr
     if (!GetMonitorInfoW(monitor, &info))
       throw std::runtime_error("Shuangpin keymap monitor unavailable");
     const std::string profile = frame->hint.profile;
-    const bool content_changed = profile != profile_ || frame->hint.key != highlighted_;
+    const bool content_changed = profile != last_profile_ || frame->hint.key != highlighted_;
+    last_profile_ = profile;
     load_profile(profile);
     highlighted_ = frame->hint.key;
     // 尺寸按候选窗所在显示器的 DPI 算，和候选窗一起跨屏时也一致。
@@ -157,6 +183,23 @@ void ShuangpinKeymapWindow::update(const std::optional<ShuangpinKeymapFrame> &fr
     fail(failure_at_stage("update", static_cast<uint32_t>(GetLastError())));
   }
 }
+bool ShuangpinKeymapWindow::ensure_image() {
+  if (image_)
+    return true;
+  const HINSTANCE instance = GetModuleHandleW(nullptr);
+  const HRSRC resource = FindResourceW(instance, MAKEINTRESOURCEW(IDR_MSIME_XHYX), RT_RCDATA);
+  if (!resource)
+    return false;
+  const HGLOBAL loaded = LoadResource(instance, resource);
+  if (!loaded)
+    return false;
+  const void *bytes = LockResource(loaded);
+  const DWORD size = SizeofResource(instance, resource);
+  if (!bytes || size == 0)
+    return false;
+  image_ = device_.GetBitmapFromMemory(bytes, size, L"resource:xhyx");
+  return image_ != nullptr;
+}
 void ShuangpinKeymapWindow::paint() {
   PAINTSTRUCT state{};
   const HDC dc = BeginPaint(window_, &state);
@@ -167,6 +210,43 @@ void ShuangpinKeymapWindow::paint() {
     PAINTSTRUCT &state;
     ~End() { EndPaint(window, &state); }
   } end{window_, state};
+  if (kind_ == KeymapKind::XiaoheRoot) {
+    if (!ensure_image())
+      throw std::runtime_error("Xiaohe root image unavailable");
+    if (!device_.EnsureForComposition(window_))
+      throw std::runtime_error("Xiaohe root device unavailable");
+    auto *image_target = device_.GetRenderTarget();
+    if (!image_target)
+      throw std::runtime_error("Xiaohe root render target unavailable");
+    const D2D1_SIZE_F natural = image_->GetSize();
+    // 与双拼键位图同一块卡片（620×203 DIP）：图片等比缩放到卡片内并居中，宽高比不同时两侧留白，而不是拉伸变形。
+    const float box_width = static_cast<float>(metrics_.width);
+    const float box_height = static_cast<float>(metrics_.height);
+    const float scale = (natural.width > 0.0f && natural.height > 0.0f)
+                            ? std::min(box_width / natural.width, box_height / natural.height)
+                            : 1.0f;
+    const float drawn_width = natural.width * scale;
+    const float drawn_height = natural.height * scale;
+    const float origin_x = static_cast<float>(metrics_.shadow.left) + (box_width - drawn_width) / 2.0f;
+    const float origin_y = static_cast<float>(metrics_.shadow.top) + (box_height - drawn_height) / 2.0f;
+    const D2D1_RECT_F destination{origin_x, origin_y, origin_x + drawn_width, origin_y + drawn_height};
+    image_target->BeginDraw();
+    image_target->Clear(D2D1::ColorF(0, 0.0f));
+    image_target->DrawBitmap(image_, destination, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_HIGH_QUALITY);
+    const HRESULT image_drawn = image_target->EndDraw();
+    if (SUCCEEDED(image_drawn) && FAILED(device_.Present()))
+      throw std::runtime_error("Xiaohe root presentation failed");
+    if (image_drawn == static_cast<HRESULT>(D2DERR_RECREATE_TARGET)) {
+      device_.DiscardTarget();
+      device_.ClearBitmapCache();
+      image_ = nullptr;
+      InvalidateRect(window_, nullptr, FALSE);
+      return;
+    }
+    if (FAILED(image_drawn))
+      throw std::runtime_error("Xiaohe root drawing failed");
+    return;
+  }
   if (title_.empty())
     return;
   if (!device_.EnsureForComposition(window_))
@@ -180,9 +260,10 @@ void ShuangpinKeymapWindow::paint() {
       throw std::runtime_error("Shuangpin keymap brush unavailable");
     return created;
   };
-  auto format = [&](const wchar_t *family, float size, DWRITE_FONT_WEIGHT weight, DWRITE_TEXT_ALIGNMENT alignment) {
+  auto format = [&](const wchar_t *family, float size, DWRITE_FONT_WEIGHT weight, DWRITE_TEXT_ALIGNMENT alignment,
+                    DWRITE_WORD_WRAPPING wrapping = DWRITE_WORD_WRAPPING_NO_WRAP) {
     auto *created = device_.GetTextFormat(family, size, weight, alignment, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-                                          DWRITE_WORD_WRAPPING_NO_WRAP);
+                                          wrapping);
     if (!created)
       throw std::runtime_error("Shuangpin keymap text format unavailable");
     return created;
@@ -213,7 +294,9 @@ void ShuangpinKeymapWindow::paint() {
                    brush(palette_.number));
 
   auto *key_format = format(L"Consolas", 11.0f, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING);
-  auto *codes_format = format(L"Segoe UI", 9.0f, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER);
+  const bool roots = kind_ == KeymapKind::XiaoheRoot;
+  auto *codes_format = format(L"Segoe UI", 9.0f, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER,
+                              roots ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
   // 未高亮的键帽是卡面上一层浅色，描一圈正文色的细边；高亮键填强调色，字按强调色的明暗取黑或白。
   auto key_fill = palette_.hover;
   auto key_border = palette_.text;
@@ -240,18 +323,22 @@ void ShuangpinKeymapWindow::paint() {
                        D2D1_RECT_F{bounds.left + 7.0f, bounds.top + 3.0f, bounds.right, bounds.top + 17.0f},
                        brush(highlighted ? on_accent : palette_.text));
       const auto codes = wide(key.codes);
-      if (!codes.empty())
-        target->DrawText(codes.c_str(), static_cast<UINT32>(codes.size()), codes_format,
-                         D2D1_RECT_F{bounds.left, bounds.bottom - 17.0f, bounds.right, bounds.bottom - 3.0f},
+      if (!codes.empty()) {
+        // 双拼的声母/韵母一行放得下，字根要换行，所以字根从键名下方一直排到键帽底边。
+        const D2D1_RECT_F codes_bounds =
+            roots ? D2D1_RECT_F{bounds.left + 2.0f, bounds.top + 15.0f, bounds.right - 2.0f, bounds.bottom - 3.0f}
+                  : D2D1_RECT_F{bounds.left, bounds.bottom - 17.0f, bounds.right, bounds.bottom - 3.0f};
+        target->DrawText(codes.c_str(), static_cast<UINT32>(codes.size()), codes_format, codes_bounds,
                          brush(highlighted ? on_accent_secondary : palette_.number));
+      }
     }
   }
 
-  // 底部的零声母说明，居中一行。
+  // 底部的说明，居中一行：双拼是零声母，小鹤字根是笔画。
   const D2D1_RECT_F footer{card.left + side,
                            card.bottom - static_cast<float>(metrics_.footer_bottom + metrics_.footer_height),
                            card.right - side, card.bottom - static_cast<float>(metrics_.footer_bottom)};
-  target->DrawText(zero_initials_.c_str(), static_cast<UINT32>(zero_initials_.size()),
+  target->DrawText(footer_.c_str(), static_cast<UINT32>(footer_.size()),
                    format(L"Segoe UI", 10.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER), footer,
                    brush(palette_.number));
   const HRESULT drawn = target->EndDraw();
@@ -286,6 +373,8 @@ LRESULT CALLBACK ShuangpinKeymapWindow::procedure(HWND window, UINT message, WPA
     case WM_DPICHANGED:
       // 跟着候选窗挪到另一块 DPI 不同的显示器：尺寸已经按候选窗所在显示器的 DPI 算好，不采用系统建议的矩形；丢掉旧的合成表面，下次绘制按新的 DPI 重建。
       self->device_.DiscardTarget();
+      self->device_.ClearBitmapCache();
+      self->image_ = nullptr;
       InvalidateRect(window, nullptr, FALSE);
       return 0;
     case WM_DISPLAYCHANGE:
@@ -293,6 +382,8 @@ LRESULT CALLBACK ShuangpinKeymapWindow::procedure(HWND window, UINT message, WPA
     case WM_DWMCOMPOSITIONCHANGED:
       // 换了显示器设置：丢掉旧的合成表面并收起，下一轮主循环按新的环境重新摆放。
       self->device_.DiscardTarget();
+      self->device_.ClearBitmapCache();
+      self->image_ = nullptr;
       self->hide();
       return 0;
     case WM_PAINT:

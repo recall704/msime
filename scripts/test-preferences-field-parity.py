@@ -29,7 +29,7 @@ RUST = ROOT / "crates/client-core/src/preferences.rs"
 # Rust fields with no control on the settings page, and why.
 RUST_ONLY: dict[str, set[str]] = {
     # 自定义双拼表（#6572）：目前只能经 MCP 的 update_preferences 设置，设置页的编辑、导入导出是后续工作；页面拿到的对象原样带着它保存，不会丢。
-    "Preferences": {"shuangpin_custom_profile"},
+    "Preferences": {"shuangpin_custom_profile", "xiaohe_root_hint"},
 }
 
 

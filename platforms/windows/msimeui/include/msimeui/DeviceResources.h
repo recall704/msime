@@ -42,6 +42,11 @@ class DeviceResources
                                      DWRITE_TEXT_ALIGNMENT textAlignment, DWRITE_PARAGRAPH_ALIGNMENT paragraphAlignment,
                                      DWRITE_WORD_WRAPPING wordWrapping);
     ID2D1Bitmap *GetBitmapFromFile(const std::wstring &filePath, D2D1_SIZE_F *size = nullptr);
+    // Decodes an image already in memory (e.g. an RCDATA resource) with the same
+    // WIC path and cache as GetBitmapFromFile, keyed by `key`. The bytes are only
+    // read during the call, so the caller keeps ownership of them.
+    ID2D1Bitmap *GetBitmapFromMemory(const void *data, size_t size, const std::wstring &key,
+                                     D2D1_SIZE_F *outSize = nullptr);
     // An icon already loaded from a module's resources. `key` names the cache
     // entry; the caller owns the HICON, which is only read here. Icons come
     // from the executable rather than a file so that a surface drawing its

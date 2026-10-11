@@ -3343,6 +3343,10 @@ private:
       bool_row(schemes, 0xE765, L"输入时显示双拼键位提示",
                L"双拼输入时显示当前方案的键位图，完成上屏后自动隐藏。",
                L"shuangpin_keymap_hint", false);
+      // 共享偏好 xiaohe_root_hint，独立于双拼键位提示；同样没选过时按关显示。
+      bool_row(schemes, 0xE765, L"输入时显示小鹤音形字根",
+               L"双拼输入时显示小鹤音形的字根键位图，完成上屏后自动隐藏。",
+               L"xiaohe_root_hint", false);
     }
     if (scheme == L"vietnamese" || indexing_) {
       segment_row(schemes, 0xE8AB, L"越南语输入法", L"Telex 用字母打声调和变音，VNI 用数字键",
